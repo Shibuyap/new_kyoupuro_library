@@ -18,12 +18,22 @@
       }
 
   ◆ 典型用法
-      RollingHash rh(S);                    // 前処理 O(N)
-      if(rh.same(l1,r1,l2,r2)) ...          // 部分文字列一致
-      // パターン検索
-      uint64_t hp = RollingHash(P).get(0,P.size());
-      for(int i=0;i+M<=N;++i)
-          if(rh.get(i,i+M)==hp && S.substr(i,M)==P) hit.push_back(i);
+      RollingHash rh(S);                 // 前処理 O(N)
+      // 1. 部分文字列一致
+      if(rh.same(l1,r1,l2,r2)) ...
+
+      // 2. パターン検索
+      RollingHash hp(P);
+      ull hv = hp.get(0,P.size());
+      for(int i=0;i+P.size()<=S.size();++i)
+          if(rh.get(i,i+P.size())==hv && S.compare(i,P.size(),P)==0) hit.push_back(i);
+
+      // 3. LCP (suffix i,j)
+      int lcp = lcp_suffix(rh,i,j,S.size());
+
+      // 4. 回文区間判定
+      RollingHash rev(string(S.rbegin(),S.rend()));
+      bool pal = is_pal(rh,rev,l,r,S.size());
 ************************************************************/
 
 #pragma once
@@ -114,6 +124,151 @@ struct DoubleHash
   }
 };
 #endif
+
+/// suffix LCP (S[i…], S[j…])
+int lcp_suffix(const RollingHash &rh, int i, int j, int N)
+{
+  int lo = 0, hi = N - max(i, j);
+  while (lo < hi)
+  {
+    int mid = (lo + hi + 1) / 2;
+    if (rh.same(i, i + mid, j, j + mid))
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  return lo;
+}
+
+/// 区間 [l,r) が回文か判定 (前計算: forward, reverse 両 RollingHash)
+bool is_pal(const RollingHash &fwd, const RollingHash &rev, int l, int r, int N)
+{
+  // fwd : S, rev : reversed S
+  return fwd.get(l, r) == rev.get(N - r, N - l);
+}
+
+/************************************************************
+◆ 典型用法 (RollingHash で LCS)
+    auto [len, ia, ib] = longest_common_substr(A, B);
+    // len  が 0 なら共通部分文字列なし
+    // A.substr(ia,len) が最長の一例
+************************************************************/
+// 返り値: pair<長さ, (A側の開始位置, B側の開始位置)>
+// 解が複数ある場合は最初に見つかったもの
+tuple<int, int, int> longest_common_substr(const string &A, const string &B)
+{
+  int NA = (int)A.size(), NB = (int)B.size();
+  RollingHash ha(A), hb(B);
+
+  int lo = 0, hi = min(NA, NB), bestLen = 0;
+  int bestIa = -1, bestIb = -1;
+
+  auto existsLen = [&](int L) -> bool
+  {
+    unordered_map<unsigned long long, vector<int>> mp;
+    mp.reserve(NA - L + 1);
+    for (int i = 0; i + L <= NA; ++i)
+      mp[ha.get(i, i + L)].push_back(i);
+
+    for (int j = 0; j + L <= NB; ++j)
+    {
+      auto hv = hb.get(j, j + L);
+      auto it = mp.find(hv);
+      if (it == mp.end())
+        continue;
+      // 衝突チェック (必要なら)
+      for (int ia : it->second)
+      {
+        if (A.compare(ia, L, B, j, L) == 0)
+        {
+          bestIa = ia;
+          bestIb = j;
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  while (lo <= hi)
+  {
+    int mid = (lo + hi) / 2;
+    int saveIa = bestIa, saveIb = bestIb;
+    if (existsLen(mid))
+    { // 長さ mid の共通部分文字列が存在
+      bestLen = mid;
+      lo = mid + 1;
+    }
+    else
+    {
+      bestIa = saveIa;
+      bestIb = saveIb; // 巻き戻す
+      hi = mid - 1;
+    }
+  }
+  return {bestLen, bestIa, bestIb}; // bestIa = -1 なら空文字
+}
+
+/************************************************************
+◆ 典型用法 (最長重複部分列= 文字列 S 内で 2 回以上現れる最長の連続部分文字列)
+    auto [len,pos] = longest_repeated_substr_hash(S);
+    // S.substr(pos,len) が S 内で 2 回以上現れる最長部分文字列
+************************************************************/
+//======================================================================
+// ① RollingHash + 二分探索 + ハッシュ集合   O(N log N)
+//    文字列長 2e5 程度までなら十分高速。衝突が気になる場合は DoubleHash に置換。
+//    返り値: {長さ, 開始位置}  (存在しなければ {0,-1})
+//======================================================================
+inline std::pair<int, int> longest_repeated_substr_hash(const std::string &S)
+{
+  using ull = unsigned long long;
+  const int N = (int)S.size();
+  if (N <= 1)
+    return {0, -1};
+
+  RollingHash rh(S);
+  int bestLen = 0, bestPos = -1;
+
+  // 真偽判定: 長さ L の重複部分文字列があるか
+  auto existLen = [&](int L) -> bool
+  {
+    std::unordered_map<ull, int> mp;
+    mp.reserve(N); // rehash 抑制
+    for (int i = 0; i + L <= N; ++i)
+    {
+      ull h = rh.get(i, i + L);
+      auto it = mp.find(h);
+      if (it == mp.end())
+      {
+        mp.emplace(h, i);
+      }
+      else
+      {
+        // 衝突確認 (シングルハッシュ時のみ)
+        if (S.compare(it->second, L, S, i, L) == 0)
+        {
+          bestPos = it->second; // 代表位置を保存
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  // 長さを二分探索
+  for (int lo = 1, hi = N - 1; lo <= hi;)
+  {
+    int mid = (lo + hi) / 2;
+    if (existLen(mid))
+    { // mid が作れる
+      bestLen = mid;
+      lo = mid + 1;
+    }
+    else
+      hi = mid - 1;
+  }
+  return {bestLen, bestPos};
+}
 
 int main()
 {
